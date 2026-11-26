@@ -1,7 +1,9 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Pool, type PoolClient } from "pg";
 import { PGlite } from "@electric-sql/pglite";
+import { SCHEMA_SQL } from "./schema-sql";
 
 export interface QueryResult<T = Record<string, unknown>> {
   rows: T[];
@@ -23,12 +25,18 @@ const globalForDb = globalThis as unknown as {
 };
 
 function getPgPool(): Pool | null {
-  if (!process.env.DATABASE_URL) return null;
+  const conn = process.env.DATABASE_URL;
+  if (!conn) return null;
   if (!globalForDb.__ihqaPool) {
+    const isLocal =
+      conn.includes("localhost") ||
+      conn.includes("127.0.0.1") ||
+      conn.includes("sslmode=disable");
     globalForDb.__ihqaPool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      max: 20,
+      connectionString: conn,
+      max: process.env.VERCEL ? 5 : 20,
       idleTimeoutMillis: 30_000,
+      ssl: isLocal ? false : { rejectUnauthorized: false },
     });
   }
   return globalForDb.__ihqaPool;
@@ -36,10 +44,20 @@ function getPgPool(): Pool | null {
 
 function getPglite(): PGlite {
   if (!globalForDb.__ihqaPglite) {
-    const dataRoot = path.join(process.cwd(), "data");
-    fs.mkdirSync(dataRoot, { recursive: true });
-    const dbDir = path.join(dataRoot, "ihqa-pgdata");
-    globalForDb.__ihqaPglite = new PGlite(dbDir);
+    const isServerless = Boolean(
+      process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME
+    );
+    try {
+      const baseRoot = isServerless
+        ? os.tmpdir()
+        : path.join(process.cwd(), "data");
+      fs.mkdirSync(baseRoot, { recursive: true });
+      const dbDir = path.join(baseRoot, "ihqa-pgdata");
+      globalForDb.__ihqaPglite = new PGlite(dbDir);
+    } catch {
+      // Fallback to in-memory PGlite if filesystem is strictly read-only
+      globalForDb.__ihqaPglite = new PGlite();
+    }
   }
   return globalForDb.__ihqaPglite;
 }
@@ -77,9 +95,7 @@ async function rawExec(sql: string): Promise<void> {
 export async function ensureDbReady(): Promise<void> {
   if (!globalForDb.__ihqaInitPromise) {
     globalForDb.__ihqaInitPromise = (async () => {
-      const schemaPath = path.join(process.cwd(), "db", "schema.sql");
-      const schemaSql = fs.readFileSync(schemaPath, "utf8");
-      await rawExec(schemaSql);
+      await rawExec(SCHEMA_SQL);
       const { seedDatabaseIfEmpty } = await import("./seed");
       await seedDatabaseIfEmpty({
         query: rawQuery,

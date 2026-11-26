@@ -4,30 +4,6 @@ import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-interface SignalMessage {
-  seq: number;
-  from: "STUDENT" | "JUDGE";
-  type: "join" | "offer" | "answer" | "ice" | "leave";
-  payload?: unknown;
-  ts: number;
-}
-
-interface RoomSignals {
-  nextSeq: number;
-  messages: SignalMessage[];
-}
-
-const globalForSignal = globalThis as unknown as {
-  __ihqaSignals?: Map<string, RoomSignals>;
-};
-
-function getSignalStore(): Map<string, RoomSignals> {
-  if (!globalForSignal.__ihqaSignals) {
-    globalForSignal.__ihqaSignals = new Map();
-  }
-  return globalForSignal.__ihqaSignals;
-}
-
 async function authorizeAssessment(
   assessmentId: number,
   requestedRole?: "STUDENT" | "JUDGE"
@@ -78,29 +54,39 @@ export async function GET(request: Request) {
   const auth = await authorizeAssessment(assessmentId, requestedRole);
   if ("error" in auth && auth.error) return auth.error;
 
-  const store = getSignalStore();
-  const room = store.get(auth.roomName);
-  if (!room) {
-    return NextResponse.json({ messages: [], lastSeq: since });
-  }
-
-  // Prune stale messages older than 2 minutes
-  const cutoff = Date.now() - 120_000;
-  room.messages = room.messages.filter((m) => m.ts >= cutoff);
-
-  const incoming = room.messages.filter(
-    (m) => m.seq > since && m.from !== auth.role
+  await query(
+    `DELETE FROM webrtc_signals WHERE created_at < NOW() - INTERVAL '3 minutes'`
   );
-  const lastSeq =
-    incoming.length > 0 ? incoming[incoming.length - 1].seq : since;
 
-  return NextResponse.json({ messages: incoming, lastSeq });
+  const res = await query<{
+    id: number;
+    sender_role: "STUDENT" | "JUDGE";
+    signal_type: string;
+    payload_json: unknown;
+  }>(
+    `SELECT id, sender_role, signal_type, payload_json
+     FROM webrtc_signals
+     WHERE room_name = $1 AND id > $2 AND sender_role <> $3
+     ORDER BY id ASC`,
+    [auth.roomName, since, auth.role]
+  );
+
+  const messages = res.rows.map((r) => ({
+    seq: r.id,
+    from: r.sender_role,
+    type: r.signal_type,
+    payload: r.payload_json,
+  }));
+  const lastSeq =
+    messages.length > 0 ? messages[messages.length - 1].seq : since;
+
+  return NextResponse.json({ messages, lastSeq });
 }
 
 export async function POST(request: Request) {
   const body = await request.json();
   const assessmentId = Number(body.assessmentId);
-  const type = body.type as SignalMessage["type"];
+  const type = String(body.type || "");
   const requestedRole =
     body.role === "JUDGE" ? "JUDGE" : body.role === "STUDENT" ? "STUDENT" : undefined;
   if (!assessmentId || !type) {
@@ -110,28 +96,25 @@ export async function POST(request: Request) {
   const auth = await authorizeAssessment(assessmentId, requestedRole);
   if ("error" in auth && auth.error) return auth.error;
 
-  const store = getSignalStore();
-  let room = store.get(auth.roomName);
-  if (!room) {
-    room = { nextSeq: 1, messages: [] };
-    store.set(auth.roomName, room);
-  }
-
-  // If peer starts a fresh join/offer, clear previous SDP offers so reconnects are clean
   if (type === "join" || type === "offer") {
-    room.messages = room.messages.filter(
-      (m) => !(m.from === auth.role && (m.type === "offer" || m.type === "answer" || m.type === "ice"))
+    await query(
+      `DELETE FROM webrtc_signals
+       WHERE room_name = $1 AND sender_role = $2 AND signal_type IN ('offer', 'answer', 'ice')`,
+      [auth.roomName, auth.role]
     );
   }
 
-  const seq = room.nextSeq++;
-  room.messages.push({
-    seq,
-    from: auth.role,
-    type,
-    payload: body.payload,
-    ts: Date.now(),
-  });
+  const ins = await query<{ id: number }>(
+    `INSERT INTO webrtc_signals (room_name, sender_role, signal_type, payload_json)
+     VALUES ($1, $2, $3, $4::jsonb)
+     RETURNING id`,
+    [
+      auth.roomName,
+      auth.role,
+      type,
+      body.payload !== undefined ? JSON.stringify(body.payload) : null,
+    ]
+  );
 
-  return NextResponse.json({ ok: true, seq });
+  return NextResponse.json({ ok: true, seq: ins.rows[0]?.id });
 }

@@ -211,7 +211,17 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS webrtc_signals (
+  id SERIAL PRIMARY KEY,
+  room_name VARCHAR(100) NOT NULL,
+  sender_role VARCHAR(16) NOT NULL,
+  signal_type VARCHAR(24) NOT NULL,
+  payload_json JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Capacity & query performance indexes for 40,000+ Kerala students
+CREATE INDEX IF NOT EXISTS idx_webrtc_room_id ON webrtc_signals(room_name, id);
 CREATE INDEX IF NOT EXISTS idx_students_district ON students(district_id);
 CREATE INDEX IF NOT EXISTS idx_students_category ON students(category_id);
 CREATE INDEX IF NOT EXISTS idx_students_batch ON students(batch_id);

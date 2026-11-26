@@ -7,6 +7,12 @@ const nextConfig: NextConfig = {
     "bcryptjs",
     "livekit-server-sdk",
   ],
+  outputFileTracingIncludes: {
+    "/**": ["./node_modules/@electric-sql/pglite/dist/**/*", "./db/**/*"],
+  },
+  outputFileTracingExcludes: {
+    "/**": ["./data/**/*"],
+  },
   images: {
     unoptimized: true,
   },
