@@ -21,6 +21,21 @@ interface LiveRoomPlayerProps {
   onEndCall?: () => void;
 }
 
+interface SignalEnvelope {
+  seq?: number;
+  from: "STUDENT" | "JUDGE";
+  type: "ready" | "offer" | "answer" | "ice" | "leave";
+  payload?: any;
+}
+
+const ICE_CONFIG: RTCConfiguration = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+  ],
+};
+
 export function LiveRoomPlayer({
   assessmentId,
   role,
@@ -45,39 +60,208 @@ export function LiveRoomPlayer({
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const lkRoomRef = useRef<Room | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const bcRef = useRef<BroadcastChannel | null>(null);
+
+  const myNonceRef = useRef<string>(Math.random().toString(36).slice(2, 10));
+  const activePeerNonceRef = useRef<string | null>(null);
+  const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
+  const seenKeysRef = useRef<Set<string>>(new Set());
   const lastSeqRef = useRef<number>(0);
   const isMountedRef = useRef(true);
+  const connStateRef = useRef(connState);
+  connStateRef.current = connState;
 
-  const cleanup = useCallback(() => {
-    void lkRoomRef.current?.disconnect();
-    lkRoomRef.current = null;
+  const cleanupPeerOnly = useCallback(() => {
     pcRef.current?.close();
     pcRef.current = null;
-    localStreamRef.current?.getTracks().forEach((t) => t.stop());
-    localStreamRef.current = null;
+    pendingIceRef.current = [];
     remoteStreamRef.current = null;
   }, []);
 
+  const cleanupAll = useCallback(() => {
+    void lkRoomRef.current?.disconnect();
+    lkRoomRef.current = null;
+    cleanupPeerOnly();
+    bcRef.current?.close();
+    bcRef.current = null;
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    localStreamRef.current = null;
+  }, [cleanupPeerOnly]);
+
   const sendSignal = useCallback(
     async (
-      type: "join" | "offer" | "answer" | "ice" | "leave",
-      payload?: unknown
+      type: SignalEnvelope["type"],
+      payload?: any
     ) => {
-      await fetch("/api/livekit/signal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ assessmentId, role, type, payload }),
-      });
+      const envelope: SignalEnvelope = { from: role, type, payload };
+      try {
+        bcRef.current?.postMessage(envelope);
+      } catch {}
+      try {
+        await fetch("/api/livekit/signal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ assessmentId, role, type, payload }),
+        });
+      } catch {}
     },
     [assessmentId, role]
   );
 
+  const createPeerConnection = useCallback(
+    (peerNonce: string) => {
+      cleanupPeerOnly();
+      activePeerNonceRef.current = peerNonce;
+
+      const pc = new RTCPeerConnection(ICE_CONFIG);
+      pcRef.current = pc;
+
+      const remoteStream = new MediaStream();
+      remoteStreamRef.current = remoteStream;
+
+      const stream = localStreamRef.current;
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          pc.addTrack(track, stream);
+        }
+      } else {
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.addTransceiver("audio", { direction: "recvonly" });
+      }
+
+      pc.ontrack = (event) => {
+        const incoming = event.streams[0];
+        if (incoming) {
+          incoming.getTracks().forEach((tr) => {
+            if (!remoteStream.getTracks().some((x) => x.id === tr.id)) {
+              remoteStream.addTrack(tr);
+            }
+          });
+        } else if (!remoteStream.getTracks().some((x) => x.id === event.track.id)) {
+          remoteStream.addTrack(event.track);
+        }
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          void remoteVideoRef.current.play().catch(() => {});
+        }
+        setRemoteHasVideo(true);
+        setConnState("connected");
+        setStatusNote("1-to-1 Live WebRTC Video Active");
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          void sendSignal("ice", {
+            nonce: peerNonce,
+            candidate: event.candidate.toJSON(),
+          });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "connected") {
+          setConnState("connected");
+          setStatusNote("1-to-1 Live WebRTC Video Active");
+        } else if (
+          pc.connectionState === "disconnected" ||
+          pc.connectionState === "failed"
+        ) {
+          setRemoteHasVideo(false);
+          setConnState("waiting-peer");
+          setStatusNote(`Connection interrupted. Waiting for ${remoteLabel}...`);
+        }
+      };
+
+      return pc;
+    },
+    [cleanupPeerOnly, remoteLabel, sendSignal]
+  );
+
+  const flushPendingIce = async (pc: RTCPeerConnection) => {
+    const items = pendingIceRef.current;
+    pendingIceRef.current = [];
+    for (const c of items) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch {}
+    }
+  };
+
+  const handleSignal = useCallback(
+    async (msg: SignalEnvelope) => {
+      if (msg.from === role) return;
+
+      const dedupKey =
+        msg.type === "ice"
+          ? `ice:${msg.payload?.nonce}:${msg.payload?.candidate?.candidate}`
+          : msg.type === "ready"
+          ? `ready:${msg.payload?.nonce}`
+          : `${msg.type}:${msg.payload?.nonce}`;
+
+      if (msg.type !== "leave" && seenKeysRef.current.has(dedupKey)) return;
+      seenKeysRef.current.add(dedupKey);
+
+      if (msg.type === "ready" && role === "JUDGE") {
+        const studentNonce = String(msg.payload?.nonce || "");
+        if (!studentNonce) return;
+        const pc = createPeerConnection(studentNonce);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await sendSignal("offer", { nonce: studentNonce, sdp: offer });
+        setStatusNote(`Connecting to ${remoteLabel}...`);
+      } else if (msg.type === "offer" && role === "STUDENT") {
+        const targetNonce = String(msg.payload?.nonce || "");
+        if (targetNonce !== myNonceRef.current || !msg.payload?.sdp) return;
+        const pc = createPeerConnection(myNonceRef.current);
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.payload.sdp));
+        await flushPendingIce(pc);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await sendSignal("answer", { nonce: myNonceRef.current, sdp: answer });
+        setStatusNote(`Connecting to ${remoteLabel}...`);
+      } else if (msg.type === "answer" && role === "JUDGE") {
+        const answerNonce = String(msg.payload?.nonce || "");
+        const pc = pcRef.current;
+        if (
+          !pc ||
+          answerNonce !== activePeerNonceRef.current ||
+          !msg.payload?.sdp ||
+          pc.signalingState !== "have-local-offer"
+        ) {
+          return;
+        }
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.payload.sdp));
+        await flushPendingIce(pc);
+      } else if (msg.type === "ice" && msg.payload?.candidate) {
+        const iceNonce = String(msg.payload?.nonce || "");
+        const pc = pcRef.current;
+        if (!pc || iceNonce !== activePeerNonceRef.current) return;
+        if (!pc.remoteDescription) {
+          pendingIceRef.current.push(msg.payload.candidate);
+        } else {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.payload.candidate));
+          } catch {}
+        }
+      } else if (msg.type === "leave") {
+        setRemoteHasVideo(false);
+        setConnState("waiting-peer");
+        setStatusNote(`${remoteLabel} left the room.`);
+        seenKeysRef.current.clear();
+      }
+    },
+    [createPeerConnection, remoteLabel, role, sendSignal]
+  );
+
   const startConnection = useCallback(async () => {
-    cleanup();
+    cleanupAll();
+    seenKeysRef.current.clear();
+    myNonceRef.current = Math.random().toString(36).slice(2, 10);
+    activePeerNonceRef.current = null;
+    lastSeqRef.current = 0;
     setConnState("connecting");
     setRemoteHasVideo(false);
     setStatusNote("Authorizing private 1-to-1 room...");
-    lastSeqRef.current = 0;
 
     try {
       const tkRes = await fetch("/api/livekit/token", {
@@ -92,7 +276,6 @@ export function LiveRoomPlayer({
         return;
       }
 
-      // Acquire local camera/mic
       let stream: MediaStream | null = null;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -116,9 +299,9 @@ export function LiveRoomPlayer({
       localStreamRef.current = stream;
       if (localVideoRef.current && stream) {
         localVideoRef.current.srcObject = stream;
+        void localVideoRef.current.play().catch(() => {});
       }
 
-      // Option A: LiveKit Cloud / Self-hosted server
       if (tk.configured && tk.url && tk.token) {
         setTransportMode("livekit-cloud");
         const room = new Room();
@@ -145,80 +328,32 @@ export function LiveRoomPlayer({
         return;
       }
 
-      // Option B: Built-in Peer-to-Peer WebRTC signaling across tabs/devices
       setTransportMode("p2p-webrtc");
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
-      pcRef.current = pc;
 
-      const remoteStream = new MediaStream();
-      remoteStreamRef.current = remoteStream;
-
-      if (stream) {
-        for (const track of stream.getTracks()) {
-          pc.addTrack(track, stream);
-        }
-      } else {
-        pc.addTransceiver("video", { direction: "recvonly" });
-        pc.addTransceiver("audio", { direction: "recvonly" });
+      // Same-browser cross-tab instantaneous signaling channel
+      if (typeof BroadcastChannel !== "undefined") {
+        const bc = new BroadcastChannel(`ihqa-webrtc-${assessmentId}`);
+        bcRef.current = bc;
+        bc.onmessage = (ev) => {
+          void handleSignal(ev.data as SignalEnvelope);
+        };
       }
 
-      pc.ontrack = (event) => {
-        const incoming = event.streams[0];
-        if (incoming) {
-          incoming.getTracks().forEach((tr) => {
-            if (!remoteStream.getTracks().some((x) => x.id === tr.id)) {
-              remoteStream.addTrack(tr);
-            }
-          });
-        } else {
-          remoteStream.addTrack(event.track);
-        }
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = remoteStream;
-        }
-        setRemoteHasVideo(true);
-        setConnState("connected");
-        setStatusNote("1-to-1 Live WebRTC Video Active");
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          void sendSignal("ice", event.candidate.toJSON());
-        }
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") {
-          setConnState("connected");
-          setStatusNote("1-to-1 Live WebRTC Video Active");
-        } else if (
-          pc.connectionState === "disconnected" ||
-          pc.connectionState === "failed"
-        ) {
-          setRemoteHasVideo(false);
-          setConnState("waiting-peer");
-          setStatusNote(`Peer disconnected. Waiting for ${remoteLabel}...`);
-        }
-      };
-
-      await sendSignal("join");
       setConnState("waiting-peer");
       setStatusNote(`Room active · Waiting for ${remoteLabel} to join...`);
 
-      // Judge proactively creates an offer if Student already joined or joins
-      if (role === "JUDGE") {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await sendSignal("offer", offer);
+      if (role === "STUDENT") {
+        await sendSignal("ready", { nonce: myNonceRef.current });
+      } else {
+        // Ask any already-open student tab to re-announce readiness
+        bcRef.current?.postMessage({ from: "JUDGE", type: "ping-ready" });
       }
     } catch (err) {
       console.error("LiveRoom connection error:", err);
       setConnState("error");
       setStatusNote("Could not establish video connection. Click Reconnect.");
     }
-  }, [assessmentId, cleanup, remoteLabel, role, sendSignal]);
+  }, [assessmentId, cleanupAll, handleSignal, remoteLabel, role, sendSignal]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -226,16 +361,52 @@ export function LiveRoomPlayer({
     return () => {
       isMountedRef.current = false;
       void sendSignal("leave").catch(() => {});
-      cleanup();
+      cleanupAll();
     };
-  }, [cleanup, sendSignal, startConnection]);
+  }, [cleanupAll, sendSignal, startConnection]);
 
-  // Poll signaling messages for peer-to-peer WebRTC
+  // Listen for Judge's ping-ready on BroadcastChannel and poll server signaling for cross-device
   useEffect(() => {
     if (transportMode !== "p2p-webrtc") return;
-    const timer = setInterval(async () => {
-      const pc = pcRef.current;
-      if (!pc) return;
+
+    const bc = bcRef.current;
+    const origOnMessage = bc?.onmessage ?? null;
+    if (bc) {
+      bc.onmessage = (ev) => {
+        if (ev.data?.type === "ping-ready" && role === "STUDENT") {
+          seenKeysRef.current.clear();
+          void sendSignal("ready", { nonce: myNonceRef.current });
+          return;
+        }
+        void handleSignal(ev.data as SignalEnvelope);
+      };
+    }
+
+    // Student periodically announces readiness until WebRTC connects
+    const readyInterval =
+      role === "STUDENT"
+        ? setInterval(() => {
+            if (connStateRef.current !== "connected") {
+              bcRef.current?.postMessage({
+                from: "STUDENT",
+                type: "ready",
+                payload: { nonce: myNonceRef.current },
+              });
+              void fetch("/api/livekit/signal", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  assessmentId,
+                  role: "STUDENT",
+                  type: "ready",
+                  payload: { nonce: myNonceRef.current },
+                }),
+              }).catch(() => {});
+            }
+          }, 2500)
+        : null;
+
+    const pollTimer = setInterval(async () => {
       try {
         const res = await fetch(
           `/api/livekit/signal?assessmentId=${assessmentId}&since=${lastSeqRef.current}&role=${role}`
@@ -246,34 +417,17 @@ export function LiveRoomPlayer({
           lastSeqRef.current = data.lastSeq;
         }
         for (const msg of data.messages || []) {
-          if (msg.type === "join" && role === "JUDGE") {
-            const offer = await pc.createOffer({ iceRestart: true });
-            await pc.setLocalDescription(offer);
-            await sendSignal("offer", offer);
-          } else if (msg.type === "offer" && role === "STUDENT") {
-            await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            await sendSignal("answer", answer);
-          } else if (msg.type === "answer" && role === "JUDGE") {
-            if (pc.signalingState === "have-local-offer") {
-              await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
-            }
-          } else if (msg.type === "ice" && msg.payload) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(msg.payload));
-            } catch {}
-          } else if (msg.type === "leave") {
-            setRemoteHasVideo(false);
-            setConnState("waiting-peer");
-            setStatusNote(`${remoteLabel} left the room.`);
-          }
+          await handleSignal(msg);
         }
       } catch {}
     }, 900);
 
-    return () => clearInterval(timer);
-  }, [assessmentId, remoteLabel, role, sendSignal, transportMode]);
+    return () => {
+      if (readyInterval) clearInterval(readyInterval);
+      clearInterval(pollTimer);
+      if (bc && origOnMessage) bc.onmessage = origOnMessage;
+    };
+  }, [assessmentId, handleSignal, role, sendSignal, transportMode]);
 
   const toggleMic = () => {
     const next = !micOn;
@@ -291,11 +445,10 @@ export function LiveRoomPlayer({
 
   const handleEnd = async () => {
     await sendSignal("leave").catch(() => {});
-    cleanup();
+    cleanupAll();
     onEndCall?.();
   };
 
-  // Remote feed is prominent (especially for Judge watching the child recite!)
   return (
     <div className="bg-[#1c1c1c] rounded-[14px] p-4 sm:p-5 text-white space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/15 pb-3 text-xs">
@@ -324,7 +477,6 @@ export function LiveRoomPlayer({
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-stretch">
-        {/* Remote Feed (Large: Child's Live Recitation for Judge, or Judge Feed for Student) */}
         <div className="md:col-span-8 aspect-video bg-black/70 rounded-[12px] overflow-hidden relative border border-white/15 flex items-center justify-center">
           <video
             ref={remoteVideoRef}
@@ -340,7 +492,7 @@ export function LiveRoomPlayer({
               <div className="text-sm font-semibold text-white">{remoteLabel}</div>
               <p className="text-xs text-white/65 max-w-xs">
                 {role === "JUDGE"
-                  ? "Waiting for candidate to open their Live Assessment room (/assessment) and join."
+                  ? "Candidate must open /assessment and enter the room. Once admitted, their camera connects automatically."
                   : "Waiting for Judge video stream to connect."}
               </p>
             </div>
@@ -350,7 +502,6 @@ export function LiveRoomPlayer({
           </span>
         </div>
 
-        {/* Local Self-View */}
         <div className="md:col-span-4 aspect-video md:aspect-auto bg-black/60 rounded-[12px] overflow-hidden relative border border-white/15 flex items-center justify-center">
           <video
             ref={localVideoRef}
@@ -365,7 +516,6 @@ export function LiveRoomPlayer({
         </div>
       </div>
 
-      {/* Controls */}
       <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
         <button
           type="button"

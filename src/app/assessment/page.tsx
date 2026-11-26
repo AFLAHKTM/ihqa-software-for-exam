@@ -50,6 +50,7 @@ export default function StudentLiveAssessmentPage() {
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const manualLeaveRef = useRef(false);
 
   const loadInfo = useCallback(async () => {
     const res = await fetch("/api/student/dashboard");
@@ -60,6 +61,15 @@ export default function StudentLiveAssessmentPage() {
     const d = await res.json();
     setInfo(d);
     setLoading(false);
+    // Automatically connect student to live 1-to-1 video room as soon as Judge admits them
+    if (d?.liveAssessment?.status === "IN_CALL" && !manualLeaveRef.current) {
+      streamRef.current?.getTracks().forEach((tr) => tr.stop());
+      streamRef.current = null;
+      setPreviewReady(false);
+      setInCall(true);
+    } else if (d?.liveAssessment?.status !== "IN_CALL") {
+      manualLeaveRef.current = false;
+    }
   }, [router]);
 
   useEffect(() => {
@@ -70,7 +80,7 @@ export default function StudentLiveAssessmentPage() {
     if (!info?.liveAssessment || info.liveAssessment.status === "COMPLETED" || inCall) return;
     const t = setInterval(() => {
       void loadInfo();
-    }, 4000);
+    }, 2500);
     return () => clearInterval(t);
   }, [info?.liveAssessment?.status, inCall, loadInfo]);
 
@@ -132,11 +142,13 @@ export default function StudentLiveAssessmentPage() {
   };
 
   const joinLiveRoom = () => {
+    manualLeaveRef.current = false;
     stopPreviewStream();
     setInCall(true);
   };
 
   const leaveCall = async () => {
+    manualLeaveRef.current = true;
     setInCall(false);
     if (info?.liveAssessment) {
       await fetch("/api/assessment/status", {

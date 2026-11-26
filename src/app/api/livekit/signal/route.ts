@@ -96,10 +96,10 @@ export async function POST(request: Request) {
   const auth = await authorizeAssessment(assessmentId, requestedRole);
   if ("error" in auth && auth.error) return auth.error;
 
-  if (type === "join" || type === "offer") {
+  if (type === "ready" || type === "offer") {
     await query(
       `DELETE FROM webrtc_signals
-       WHERE room_name = $1 AND sender_role = $2 AND signal_type IN ('offer', 'answer', 'ice')`,
+       WHERE room_name = $1 AND sender_role = $2 AND signal_type IN ('ready', 'offer', 'answer', 'ice')`,
       [auth.roomName, auth.role]
     );
   }
