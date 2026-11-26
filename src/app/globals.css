@@ -1,26 +1,95 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --ihqa-white: #ffffff;
+  --ihqa-emerald: #53be95;
+  --ihqa-gold: #f0b64f;
+  --ihqa-gold-soft: #e7bc70;
+  --ihqa-blue: #034ea2;
+  --ihqa-blue-dark: #023b7c;
+  --ihqa-surface: #efefef;
+  --ihqa-surface-warm: #f9f8f6;
+  --ihqa-ink: #1c1c1c;
+  --ihqa-muted: #555963;
+  --ihqa-border: #e2dddb;
+  --ihqa-success: #12b878;
+  --ihqa-warning: #f1ae2a;
+  --ihqa-danger: #db4b68;
+  --font-sans: var(--font-noto-sans), var(--font-malayalam), system-ui, sans-serif;
+  --font-arabic: var(--font-amiri-quran), var(--font-noto-arabic), serif;
+  --font-malayalam: var(--font-malayalam), var(--font-noto-sans), sans-serif;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--ihqa-white);
+  color: var(--ihqa-ink);
+  font-family: var(--font-noto-sans), var(--font-malayalam), Arial, sans-serif;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle Islamic 8-point geometric star pattern (low-contrast architectural texture) */
+.ihqa-geometric-bg {
+  background-color: #ffffff;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cg fill='none' stroke='%23034ea2' stroke-opacity='0.045' stroke-width='1'%3E%3Cpath d='M40 4 L49 31 L76 40 L49 49 L40 76 L31 49 L4 40 L31 31 Z'/%3E%3Crect x='18' y='18' width='44' height='44' transform='rotate(45 40 40)'/%3E%3Ccircle cx='40' cy='40' r='8'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+.ihqa-geometric-blue {
+  background-color: var(--ihqa-blue);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cg fill='none' stroke='%23ffffff' stroke-opacity='0.06' stroke-width='1'%3E%3Cpath d='M40 4 L49 31 L76 40 L49 49 L40 76 L31 49 L4 40 L31 31 Z'/%3E%3Crect x='18' y='18' width='44' height='44' transform='rotate(45 40 40)'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* Quranic Arabic typography with generous line-height so harakat/diacritics never clip */
+.quran-arabic {
+  font-family: var(--font-amiri-quran), var(--font-noto-arabic), serif;
+  direction: rtl;
+  unicode-bidi: isolate;
+  line-height: 2.25;
+  letter-spacing: 0;
+}
+
+.malayalam-text {
+  font-family: var(--font-malayalam), var(--font-noto-sans), sans-serif;
+  line-height: 1.75;
+}
+
+/* Official IHQA flat institutional buttons matching indiaquranaward.com */
+.ihqa-btn-gold {
+  background-color: var(--ihqa-gold);
+  color: var(--ihqa-ink);
+  font-weight: 600;
+  border-radius: 6px;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.ihqa-btn-gold:hover:not(:disabled) {
+  background-color: var(--ihqa-blue);
+  color: var(--ihqa-white);
+}
+
+.ihqa-btn-blue {
+  background-color: var(--ihqa-blue);
+  color: var(--ihqa-white);
+  font-weight: 600;
+  border-radius: 6px;
+  transition: background-color 0.2s ease;
+}
+.ihqa-btn-blue:hover:not(:disabled) {
+  background-color: var(--ihqa-blue-dark);
+}
+
+.ihqa-input {
+  height: 48px;
+  border: 1px solid #d7d2cf;
+  border-radius: 10px;
+  background-color: #ffffff;
+  padding: 0 14px;
+  font-size: 15px;
+  color: var(--ihqa-ink);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.ihqa-input:focus {
+  outline: none;
+  border-color: var(--ihqa-blue);
+  box-shadow: 0 0 0 3px rgba(3, 78, 162, 0.12);
 }
